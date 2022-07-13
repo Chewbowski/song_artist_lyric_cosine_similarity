@@ -1,0 +1,255 @@
+---
+title: "Artist & Song Lyric Network Graph"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+---
+
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+
+```
+
+
+```{r load_packages}
+
+library(tidyverse)
+library(tidytext)
+library(widyr)
+library(igraph)
+library(networkD3)
+library(janitor)
+
+
+```
+
+
+```{r import_data}
+
+# download the csv from 
+# https://www.kaggle.com/datasets/neisse/scrapped-lyrics-from-6-genres?resource=download&select=lyrics-data.csv
+
+song_lyric_df <- read_csv('lyrics_data.csv')
+
+
+english_clean_df <- 
+  song_lyric_df %>% 
+  filter(language == 'en') %>% 
+  clean_names() %>% 
+  transmute(artist = str_replace_all(str_remove_all(a_link, '/'),
+                                     '-',
+                                     ' '),
+            song_name = s_name,
+            lyric)
+
+```
+
+
+```{r tokenize_lyrics}
+
+# I initially tried grouping by artist and song for cosine similarity
+# however I quickly realized that the dataset is much too large to 
+# work with at that granularity. Even after filtering for the top 100
+# artists by song count, it required up to 48 GB of RAM to process the 
+# cosine similarity and the resulting dataframe of 3 columns contained 
+# ~ 816 million records and clocked in at 20.689 GB, 
+# hence the artist grouping...
+
+top_artist_by_song_count <- 
+  english_clean_df %>% 
+  count(artist) %>% 
+  ungroup() %>% 
+  # arrange(desc(n)) %>% 
+  # head(100) %>% 
+  filter(n > 25) %>% 
+  pull(artist)
+
+
+
+tokenized_df <-
+  english_clean_df %>%
+  filter(artist %in% top_artist_by_song_count) %>% 
+  unnest_tokens(output = word,
+                input = lyric,
+                drop = TRUE)
+
+
+
+term_freq_df <-
+  tokenized_df %>%
+  filter(!word %in% stop_words$word) %>% 
+  count(artist,
+        # song_name,
+        word)
+
+remove(tokenized_df)
+remove(song_lyric_df)
+# initial attempts to free up enough RAM to finish processing
+
+
+```
+
+
+```{r cosine_similarity}
+
+
+artist_cos_sim_df <-
+  term_freq_df %>%
+  pairwise_similarity(# song_name,
+                      artist,
+                      word,
+                      n)
+
+
+```
+
+
+```{r similarity_distribution}
+
+cs_hist <-
+  artist_cos_sim_df %>%
+  ggplot(aes(x = similarity)) +
+  geom_histogram()
+
+
+```
+
+
+
+Graph 1
+============
+
+
+### Graph
+
+```{r network_graph}
+
+
+cs_filter <- 0.85
+# Took some trial and error to find a reasonable threshold
+# I'd love to figure out how to automate this in the future, maybe I can 
+# use and elbow plot of groups/counts across various thresholds
+
+
+
+artist_graph <-
+  artist_cos_sim_df %>%
+  filter(similarity > cs_filter) %>%
+  select(item1, item2) %>%
+  graph_from_data_frame(directed = FALSE)
+
+
+artist_wc <- cluster_walktrap(artist_graph)
+
+artist_members <- membership(artist_wc)
+
+artist_d3 <- igraph_to_networkD3(artist_graph,
+                              group = artist_members)
+
+
+
+forceNetwork(
+  Links = artist_d3$links,
+  Nodes = artist_d3$nodes,
+  Source = 'source',
+  Target = 'target',
+  NodeID = 'name',
+  Group = 'group',
+  charge = -20,
+  opacity = 1,
+  opacityNoHover = 1,
+  height = 81 * 10,
+  width = 81 * 19,
+  fontSize = 5,
+  bounded = FALSE,
+  zoom = TRUE
+)
+```
+
+
+
+
+Graph 2
+============
+
+
+### Filtered Graph, at Least 2 Members per Group
+
+
+```{r filtered_network_graph}
+
+# at least 2 members per group
+
+
+cs_2_filter <- 0.88
+
+
+
+
+artist_membership_df <-
+  tibble(membership = artist_wc$membership,
+         names = artist_wc$names)
+
+
+
+
+artist_membership_filter <-
+  artist_membership_df %>%
+  group_by(membership) %>%
+  mutate(n = n()) %>%
+  ungroup() %>%
+  filter(n > 2) %>% 
+  pull(names)
+
+
+
+
+
+
+
+artist_graph_filtered <-
+  artist_cos_sim_df %>%
+  filter(similarity > cs_2_filter) %>%
+  filter(item1 %in% artist_membership_filter) %>%
+  select(item1, item2) %>%
+  graph_from_data_frame(directed = FALSE)
+
+
+artist_wc_filtered <- cluster_walktrap(artist_graph_filtered)
+
+artist_members_filtered <- membership(artist_wc_filtered)
+
+
+
+
+artist_d3_filtered <- igraph_to_networkD3(artist_graph_filtered,
+                              group = artist_members_filtered)
+
+
+
+forceNetwork(
+  Links = artist_d3_filtered$links,
+  Nodes = artist_d3_filtered$nodes,
+  Source = 'source',
+  Target = 'target',
+  NodeID = 'name',
+  Group = 'group',
+  charge = -20,
+  opacity = 1,
+  opacityNoHover = 1,
+  height = 81 * 10,
+  width = 81 * 19,
+  fontSize = 5,
+  bounded = FALSE,
+  zoom = TRUE
+)
+```
+
+
+
+
+
+
